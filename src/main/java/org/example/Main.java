@@ -1,5 +1,6 @@
 package org.example;
 
+// glfw for showing something on the screen. Optional
 import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.system.MemoryUtil.NULL;
 
@@ -12,6 +13,7 @@ public class Main {
 
         // ======= FIELDS ======= //
 
+        // a glfw window
         private long window;
 
         // ======= METHODS ======= //
@@ -23,13 +25,14 @@ public class Main {
             cleanup();
         }
 
+        // Optional. Vulcan can do off window rendering
         private void initWindow() {
 
             if(!glfwInit()) {
                 throw new RuntimeException("Cannot initialize GLFW");
             }
 
-
+            // do not run opengl
             glfwWindowHint(GLFW_CLIENT_API, GLFW_NO_API);
             glfwWindowHint(GLFW_RESIZABLE, GLFW_FALSE);
 
@@ -47,7 +50,7 @@ public class Main {
         }
 
         private void mainLoop() {
-
+            // error occurs or user presses X
             while(!glfwWindowShouldClose(window)) {
                 glfwPollEvents();
             }
@@ -55,9 +58,8 @@ public class Main {
         }
 
         private void cleanup() {
-
+            // juts cleanup everything when closing window
             glfwDestroyWindow(window);
-
             glfwTerminate();
         }
 
