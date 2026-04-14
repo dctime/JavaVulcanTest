@@ -1,0 +1,46 @@
+plugins {
+    id 'java'
+    id 'application'
+}
+
+group = 'org.example'
+version = '1.0-SNAPSHOT'
+
+ext {
+    lwjglVersion = '3.3.4'
+    lwjglNatives = 'natives-windows' // macOS 改成 natives-macos，Linux 改成 natives-linux
+}
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    // LWJGL BOM（統一管理版本）
+    implementation platform("org.lwjgl:lwjgl-bom:${lwjglVersion}")
+
+    // 核心
+    implementation 'org.lwjgl:lwjgl'
+    runtimeOnly "org.lwjgl:lwjgl::${lwjglNatives}"
+
+    // Vulkan
+    implementation 'org.lwjgl:lwjgl-vulkan'
+    // Vulkan 不需要 natives，從系統驅動載入
+
+    // GLFW（視窗管理，寫 Vulkan 一定需要）
+    implementation 'org.lwjgl:lwjgl-glfw'
+    runtimeOnly "org.lwjgl:lwjgl-glfw::${lwjglNatives}"
+
+    // 測試
+    testImplementation platform('org.junit:junit-bom:5.10.0')
+    testImplementation 'org.junit.jupiter:junit-jupiter'
+    testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+}
+
+application {
+    mainClass = 'org.example.Main' // 改成你的 main class 路徑
+}
+
+test {
+    useJUnitPlatform()
+}
