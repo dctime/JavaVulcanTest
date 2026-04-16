@@ -3,15 +3,22 @@ package org.example;
 // glfw for showing something on the screen. Optional
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
-import org.lwjgl.vulkan.VkApplicationInfo;
-import org.lwjgl.vulkan.VkInstance;
-import org.lwjgl.vulkan.VkInstanceCreateInfo;
+import org.lwjgl.vulkan.*;
+
+import java.nio.ByteBuffer;
+import java.nio.IntBuffer;
+import java.nio.LongBuffer;
+import java.util.HashSet;
+import java.util.Set;
+import java.util.stream.Collectors;
 
 import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.glfw.GLFWVulkan.glfwGetRequiredInstanceExtensions;
 import static org.lwjgl.system.MemoryStack.stackPush;
-import static org.lwjgl.system.MemoryUtil.NULL;
+import static org.lwjgl.system.MemoryUtil.*;
+import static org.lwjgl.vulkan.EXTDebugUtils.*;
 import static org.lwjgl.vulkan.VK10.*;
+import static org.lwjgl.system.Configuration.DEBUG;
 
 public class Main {
 
@@ -20,11 +27,43 @@ public class Main {
         private static final int WIDTH = 800;
         private static final int HEIGHT = 600;
 
+        // 如果是 debug mode 建立 validation layers
+        // 因為 vulcan 本身沒有 test 確定裡面的東西是否正確
+        private static final boolean ENABLE_VALIDATION_LAYERS = DEBUG.get(true);
+        private static final Set<String> VALIDATION_LAYERS;
+        static {
+            if(ENABLE_VALIDATION_LAYERS) {
+                VALIDATION_LAYERS = new HashSet<>();
+                VALIDATION_LAYERS.add("VK_LAYER_KHRONOS_validation");
+            } else {
+                // We are not going to use it, so we don't create it
+                VALIDATION_LAYERS = null;
+            }
+        }
+
+        // 這個 callback 會存進 debugutilsmessenger
+        private static int debugCallback(int messageSeverity, int messageType, long pCallbackData, long pUserData) { // long 都是存記憶體位址
+
+            // 這下面居然是個 struct
+            VkDebugUtilsMessengerCallbackDataEXT callbackData = VkDebugUtilsMessengerCallbackDataEXT.create(pCallbackData);
+
+            System.err.println("Validation layer: " + callbackData.pMessageString());
+
+            return VK_FALSE;
+        }
+
+        private static void destroyDebugUtilsMessengerEXT(VkInstance instance, long debugMessenger, VkAllocationCallbacks allocationCallbacks) {
+            if(vkGetInstanceProcAddr(instance, "vkDestroyDebugUtilsMessengerEXT") != NULL) { // 這個 extension 是否存在
+                vkDestroyDebugUtilsMessengerEXT(instance, debugMessenger, allocationCallbacks);
+            }
+        }
+
         // ======= FIELDS ======= //
 
         // a glfw window
         private long window;
         private VkInstance instance;
+        private long debugMessenger;
 
         // ======= METHODS ======= //
 
@@ -57,6 +96,7 @@ public class Main {
 
         private void initVulkan() {
             createInstance();
+            setupDebugMessenger(); // 這導致這個 debugMessenger不能debug createInstance的東西
         }
 
         private void mainLoop() {
@@ -68,6 +108,10 @@ public class Main {
         }
 
         private void cleanup() {
+            if(ENABLE_VALIDATION_LAYERS) {
+                destroyDebugUtilsMessengerEXT(instance, debugMessenger, null); // test remove
+            }
+            vkDestroyInstance(instance, null);
             // juts cleanup everything when closing window
             glfwDestroyWindow(window);
             glfwTerminate();
@@ -75,6 +119,10 @@ public class Main {
 
         // create Vulcan Instance
         private void createInstance() {
+            if(ENABLE_VALIDATION_LAYERS && !checkValidationLayerSupport()) {
+                throw new RuntimeException("Validation requested but not supported");
+            }
+
             // Java 的 primitive 是存在 stack 上但是物件是存在 heap 上 (畢竟要製造物件必須要使用new)
             // 這個造在 heap 上的物件隨時都會被 garbage collector 移走，因此需要弄個 stack 並且把物件存上去
             try(MemoryStack stack = stackPush()) {
@@ -84,7 +132,7 @@ public class Main {
                 // 清零因為有些指標的設定像是 pNext (定義更多的東西extension的位置) 才是 nullptr
                 VkApplicationInfo appInfo = VkApplicationInfo.calloc(stack);
 
-                appInfo.sType(VK_STRUCTURE_TYPE_APPLICATION_INFO); // sType is required
+                appInfo.sType(VK_STRUCTURE_TYPE_APPLICATION_INFO); // sType is required // 這個 application info vulcan 不 care
                 appInfo.pApplicationName(stack.UTF8Safe("Hello Triangle"));
                 appInfo.applicationVersion(VK_MAKE_VERSION(1, 0, 0));
                 appInfo.pEngineName(stack.UTF8Safe("No Engine"));
@@ -92,13 +140,32 @@ public class Main {
                 appInfo.apiVersion(VK_API_VERSION_1_0);
 
                 VkInstanceCreateInfo createInfo = VkInstanceCreateInfo.calloc(stack);
-                createInfo.sType(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO);
+                createInfo.sType(VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO); // 這個註解掉 VK_LAYER_KHRONOS_validation 會叫
                 createInfo.pApplicationInfo(appInfo);
 
-                // 讓  vulcan 知道 glfw 有螢幕可以用
-                createInfo.ppEnabledExtensionNames(glfwGetRequiredInstanceExtensions());
+                // 讓 vulcan 知道 glfw 有螢幕可以用 和其他 extension (像是 callback 的 debug utils)
+                createInfo.ppEnabledExtensionNames(getRequiredExtensions(stack));
                 // 不告知錯 直接 crash
-//                createInfo.ppEnabledLayerNames(null);
+
+                if (ENABLE_VALIDATION_LAYERS) {
+                    PointerBuffer buffer = stack.mallocPointer(VALIDATION_LAYERS.size()); // 等效 std::vector<char*> 指向char*陣列的Pointer
+                    VALIDATION_LAYERS.stream().map(stack::UTF8).forEach(buffer::put); // Java 是用 UTF16 C 用 UTF8
+                    /*
+                    buffer (PointerBuffer)
+                      │
+                      ▼
+                    [ ptr0 | ptr1 | ptr2 | ... ]
+                        │
+                        ▼
+                      "VK_LAYER_KHRONOS_validation" (UTF-8 in stack)
+                     */
+                    buffer.rewind(); // 因為 buffer::put 會把 buffer 指向的位置向後移所以把她條回原本的位置
+                    createInfo.ppEnabledLayerNames(buffer); // layer => validationLayer
+
+                    VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo = VkDebugUtilsMessengerCreateInfoEXT.calloc(stack); // 不需要放在外面因為 stack 是看 try block 去決定要不要 free 的
+                    populateDebugMessengerCreateInfo(debugCreateInfo); // callback 定義在這裡
+                    createInfo.pNext(debugCreateInfo.address()); // 這樣vkCreateInstance就會用到 callback 了
+                }
 
                 // allocate 一個 pointer 以後用來存 instance, 原版的 C 直接用 & 但是 java 沒有這東西
                 PointerBuffer instancePtr = stack.mallocPointer(1); // 申請 1 個「指標（Pointer）」 的空間
@@ -112,6 +179,86 @@ public class Main {
                 instance = new VkInstance(instancePtr.get(0), createInfo);
 
             }
+        }
+
+        private boolean checkValidationLayerSupport() {
+            try(MemoryStack stack = stackPush()) { // 開始 C++ 操作 因為 java 的物件都是放在 heap 我們希望它跟 C++ 一樣是放在 stack
+                IntBuffer layerCount = stack.ints(0); // 這裡的 0 是初始化為 0 (等效 mallocInt(1).put(0, x)) (int[] buffer])
+                vkEnumerateInstanceLayerProperties(layerCount, null); // 將層數放進 layerCount
+                VkLayerProperties.Buffer availableLayers = VkLayerProperties.malloc(layerCount.get(0), stack);
+                vkEnumerateInstanceLayerProperties(layerCount, availableLayers); // 拿到 availableLayers
+                Set<String> availableLayerNames = availableLayers.stream()
+                        .map(VkLayerProperties::layerNameString)
+                        .collect(Collectors.toSet());
+                System.out.println("All tests available:");
+                for (String name : availableLayerNames) {
+                    System.out.println(name);
+                }
+                return availableLayerNames.containsAll(VALIDATION_LAYERS);
+            }
+        }
+
+        private PointerBuffer getRequiredExtensions(MemoryStack stack) {
+
+            PointerBuffer glfwExtensions = glfwGetRequiredInstanceExtensions();
+
+            if(ENABLE_VALIDATION_LAYERS) {
+                // PointerBuffer => void* buffer[n] 放在 stack
+                PointerBuffer extensions = stack.mallocPointer(glfwExtensions.capacity() + 1);
+                // 一個 overload 把 另一個 void* buffer[] 裡的值全部一個一個倒進 extensions 裡
+                extensions.put(glfwExtensions);
+                // 單倒一個 ByteBuffer
+                extensions.put(stack.UTF8(VK_EXT_DEBUG_UTILS_EXTENSION_NAME)); // 專門決定 callback 位置的 extension
+                System.out.println("Printing extensions: Extension Capacity: " + extensions.capacity());
+                for (int i = 0; i < extensions.capacity(); i++) {
+//                    ByteBuffer byteBuffer = memByteBuffer(extensions.get(i), 256); // 去 void* buffer[] 找三個pointer 根據其位址抓256個byte的值 變成個 void* 但多存其大小256
+                    System.out.println(memUTF8(extensions.get(i))); // 去 void* buffer[] 找三個pointer根據其位址向後印出所有UTF8直到遇到\0
+                }
+                System.out.println("===========");
+                // Rewind the buffer before returning it to reset its position back to 0
+                return extensions.rewind();
+            }
+
+            return glfwExtensions;
+        }
+
+        private void populateDebugMessengerCreateInfo(VkDebugUtilsMessengerCreateInfoEXT debugCreateInfo) {
+            debugCreateInfo.sType(VK_STRUCTURE_TYPE_DEBUG_UTILS_MESSENGER_CREATE_INFO_EXT);
+            debugCreateInfo.messageSeverity(VK_DEBUG_UTILS_MESSAGE_SEVERITY_VERBOSE_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_WARNING_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_SEVERITY_ERROR_BIT_EXT);
+            debugCreateInfo.messageType(VK_DEBUG_UTILS_MESSAGE_TYPE_GENERAL_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_VALIDATION_BIT_EXT | VK_DEBUG_UTILS_MESSAGE_TYPE_PERFORMANCE_BIT_EXT);
+            debugCreateInfo.pfnUserCallback(HelloTriangleApplication::debugCallback);
+        }
+
+        private void setupDebugMessenger() {
+            if (!ENABLE_VALIDATION_LAYERS) {
+                return;
+            }
+
+            // 好像是專門為了用 pass in reference 使用 stack
+            try(MemoryStack stack = stackPush()) {
+
+                VkDebugUtilsMessengerCreateInfoEXT createInfo = VkDebugUtilsMessengerCreateInfoEXT.calloc(stack);
+
+                populateDebugMessengerCreateInfo(createInfo);
+                // Buffer 都是為了可以 pass in reference
+                LongBuffer pDebugMessenger = stack.longs(VK_NULL_HANDLE); // 做一個 long 初始值是 0 存進 LongBuffer (long buffer[])
+
+                if(createDebugUtilsMessengerEXT(instance, createInfo, null, pDebugMessenger) != VK_SUCCESS) { // pass in reference
+                    throw new RuntimeException("Failed to set up debug messenger");
+                }
+                // 從 long buffer[] 拿第一個long值
+                debugMessenger = pDebugMessenger.get(0);
+            }
+        }
+
+        private static int createDebugUtilsMessengerEXT(VkInstance instance, VkDebugUtilsMessengerCreateInfoEXT createInfo,
+                                                        VkAllocationCallbacks allocationCallbacks, LongBuffer pDebugMessenger) {
+
+            if(vkGetInstanceProcAddr(instance, "vkCreateDebugUtilsMessengerEXT") != NULL) { // vkCreateDebug.. 是個 extension function 看看他存不存在
+                return vkCreateDebugUtilsMessengerEXT(instance, createInfo, allocationCallbacks, pDebugMessenger); // 這 function 需要 instance 導致 createInstance 與 destroyInstance 不會抓到
+            }
+
+            return VK_ERROR_EXTENSION_NOT_PRESENT;
         }
 
     }

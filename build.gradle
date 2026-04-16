@@ -39,7 +39,10 @@ dependencies {
 
 application {
     mainClass = 'org.example.Main' // 改成你的 main class 路徑
-    applicationDefaultJvmArgs = ["-Dorg.lwjgl.system.stackSize=10240"]
+    applicationDefaultJvmArgs = [
+            "-Dorg.lwjgl.system.stackSize=10240",
+            "-Dorg.lwjgl.util.Debug=true"
+    ]
 }
 
 test {
