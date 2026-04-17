@@ -22,7 +22,7 @@ import static org.lwjgl.system.MemoryStack.create;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.*;
 import static org.lwjgl.vulkan.EXTDebugUtils.*;
-import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceSupportKHR;
+import static org.lwjgl.vulkan.KHRSurface.*;
 import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
 import static org.lwjgl.vulkan.KHRWin32Surface.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
 import static org.lwjgl.vulkan.KHRWin32Surface.vkGetPhysicalDeviceWin32PresentationSupportKHR;
@@ -59,6 +59,13 @@ public class Main {
             public boolean isComplete() {
                 return graphicsFamily != null && presentFamily != null;
             }
+        }
+
+        private class SwapChainSupportDetails {
+            private VkSurfaceCapabilitiesKHR capabilities;
+            private VkSurfaceFormatKHR.Buffer formats;
+            private IntBuffer presentModes;
+
         }
 
         // 這個 callback 會存進 debugutilsmessenger
@@ -331,13 +338,22 @@ public class Main {
 //                return properties.deviceType() == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU &&
 //                        feature.geometryShader();
 //            }
-            // using queuefamily
-            QueueFamilyIndices indices = findQueueFamilyIndices(device);
-            boolean extensionSupported = checkDeviceExtensionSupport(device);
-            if (extensionSupported) {
-                System.out.println("DEVICE EXTENSIONS all supported");
+            try (MemoryStack stack = stackPush()) {
+                // using queue family 檢查是否可以做 present 跟 graphical
+                QueueFamilyIndices indices = findQueueFamilyIndices(device);
+                // device extensions (swap chain extension)
+                boolean extensionSupported = checkDeviceExtensionSupport(device);
+                if (extensionSupported) {
+                    System.out.println("DEVICE EXTENSIONS all supported");
+                }
+                // 檢查是否 swap chain device 可以完成
+                boolean swapChainAdequate = false;
+                if (extensionSupported) {
+                    SwapChainSupportDetails details = querySwapChainSupport(stack, device);
+                    if (details.formats.capacity() > 0 && details.presentModes.capacity() > 0) swapChainAdequate = true;
+                }
+                return indices.isComplete() && extensionSupported && swapChainAdequate;
             }
-            return indices.isComplete() && extensionSupported;
         }
 
         private boolean checkDeviceExtensionSupport(VkPhysicalDevice device) {
@@ -453,6 +469,60 @@ public class Main {
 
                 surface = surfaceBuffer.get(0);
             }
+        }
+
+        private SwapChainSupportDetails querySwapChainSupport(MemoryStack stack, VkPhysicalDevice device) {
+            SwapChainSupportDetails details = new SwapChainSupportDetails();
+            details.capabilities = VkSurfaceCapabilitiesKHR.calloc(stack);
+            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, details.capabilities);
+            IntBuffer formatCount = stack.callocInt(1);
+            vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, formatCount, null);
+            details.formats = VkSurfaceFormatKHR.calloc(formatCount.get(0), stack);
+            if (formatCount.get(0) > 0) {
+                vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, formatCount, details.formats);
+            }
+            IntBuffer presentModeCount = stack.callocInt(1);
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, presentModeCount, null);
+            details.presentModes = stack.callocInt(presentModeCount.get(0));
+            vkGetPhysicalDeviceSurfacePresentModesKHR(device, surface, presentModeCount, details.presentModes);
+
+            return details;
+        }
+
+        private VkSurfaceFormatKHR chooseSwapSurfaceFormat(VkSurfaceFormatKHR.Buffer availableFormats) {
+            for (VkSurfaceFormatKHR availableFormat : availableFormats) {
+                if (availableFormat.format() == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                    return availableFormat;
+                }
+            }
+
+            // 沒找到 RGBA 就直接拿第一個
+            return availableFormats.get(0);
+        }
+
+        private int chooseSwapPresentMode(IntBuffer availablePresentModes) {
+            for (int i = 0; i < availablePresentModes.capacity(); i++) {
+                if (availablePresentModes.get(i) == VK_PRESENT_MODE_MAILBOX_KHR)
+                    return VK_PRESENT_MODE_MAILBOX_KHR;
+            }
+
+            return VK_PRESENT_MODE_FIFO_KHR;
+        }
+
+        private VkExtent2D chooseSwapExtent(MemoryStack stack, VkSurfaceCapabilitiesKHR.Buffer capabilities) {
+            if (capabilities.currentExtent().width() != 0xFFFFFFFF) { // 如果 gpu 要我們自己去找 width height
+                return capabilities.currentExtent();
+            }
+
+            IntBuffer width = stack.callocInt(1);
+            IntBuffer height = stack.callocInt(1);
+            glfwGetFramebufferSize(window, width, height);
+
+            VkExtent2D actualExtent = VkExtent2D.calloc(stack);
+            // clamp width and height
+            actualExtent.width(Math.min(Math.max(width.get(0), capabilities.minImageExtent().width()), capabilities.maxImageExtent().width()));
+            actualExtent.height(Math.min(Math.max(height.get(0), capabilities.minImageExtent().height()), capabilities.maxImageExtent().height()));
+            return actualExtent;
         }
 
     }
