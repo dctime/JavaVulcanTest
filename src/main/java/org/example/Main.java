@@ -14,6 +14,7 @@ import java.util.stream.Collectors;
 
 import static org.lwjgl.glfw.GLFW.*;
 import static org.lwjgl.glfw.GLFWVulkan.glfwGetRequiredInstanceExtensions;
+import static org.lwjgl.system.MemoryStack.create;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.*;
 import static org.lwjgl.vulkan.EXTDebugUtils.*;
@@ -41,6 +42,14 @@ public class Main {
             }
         }
 
+        private class QueueFamilyIndices {
+            public Integer graphicsFamily; // 專門做 graphics 的 indice // 像是 c++ 的 optional 如果 null 則沒有值
+
+            public boolean isComplete() {
+                return graphicsFamily != null;
+            }
+        }
+
         // 這個 callback 會存進 debugutilsmessenger
         private static int debugCallback(int messageSeverity, int messageType, long pCallbackData, long pUserData) { // long 都是存記憶體位址
 
@@ -64,6 +73,9 @@ public class Main {
         private long window;
         private VkInstance instance;
         private long debugMessenger;
+        private VkPhysicalDevice physicalDevice;
+        private VkDevice device;
+        private VkQueue graphicsQueue;
 
         // ======= METHODS ======= //
 
@@ -97,6 +109,8 @@ public class Main {
         private void initVulkan() {
             createInstance();
             setupDebugMessenger(); // 這導致這個 debugMessenger不能debug createInstance的東西
+            pickPhysicalDevice();
+            createLogicalDevice();
         }
 
         private void mainLoop() {
@@ -108,6 +122,8 @@ public class Main {
         }
 
         private void cleanup() {
+            // device 需要先銷毀因他需要 instance
+            vkDestroyDevice(device, null); // physical device 不需要 free 因為 physical 是 vulcan 列舉出來記憶體位置給我們選 不是我們建立的
             if(ENABLE_VALIDATION_LAYERS) {
                 destroyDebugUtilsMessengerEXT(instance, debugMessenger, null); // test remove
             }
@@ -259,6 +275,108 @@ public class Main {
             }
 
             return VK_ERROR_EXTENSION_NOT_PRESENT;
+        }
+
+        private void pickPhysicalDevice() {
+            try (MemoryStack stack = stackPush()) { // push stack pointer 等到 try block 結束後會自動 pop 回來 free stack memory
+                IntBuffer deviceCount = stack.ints(0); // 預設一個準備 reference 的 int 初始直 0
+                vkEnumeratePhysicalDevices(instance, deviceCount, null);
+                if (deviceCount.get(0) == 0) {
+                    throw new RuntimeException("Failed to find GPUs with Vulkan support");
+                }
+                PointerBuffer ppPhysicalDevices = stack.mallocPointer(deviceCount.get(0));
+                vkEnumeratePhysicalDevices(instance, deviceCount, ppPhysicalDevices);
+                System.out.println("Found " + deviceCount.get(0) + " Physical Devices");
+                for (int i = 0; i < ppPhysicalDevices.capacity(); i++) {
+                    VkPhysicalDevice device = new VkPhysicalDevice(ppPhysicalDevices.get(i), instance); // 拿到記憶體位置後 wrap 成一個 java 物件指向 vulcan device
+                    if (isDeviceSuitable(device)) {
+                        physicalDevice = device;
+                        System.out.println("Found Suitable with graphics support device at memory location " + device.address());
+                        break;
+                    }
+                }
+            } // try 結束後 free 掉 buffer 但存有 device 的 java 物件還在
+
+            if (physicalDevice == null) {
+                throw new RuntimeException("failed to find a suitable GPU!");
+            }
+        }
+
+        private boolean isDeviceSuitable(VkPhysicalDevice device) {
+            // old way
+//            try (MemoryStack stack = stackPush()) {
+                // 因為 Vk.. 是 struct 不是一個物件的 memory location 所以直接 malloc 就行
+//                VkPhysicalDeviceProperties properties = VkPhysicalDeviceProperties.malloc(stack);
+//                vkGetPhysicalDeviceProperties(device, properties);
+//                VkPhysicalDeviceFeatures feature = VkPhysicalDeviceFeatures.malloc(stack);
+//                vkGetPhysicalDeviceFeatures(device, feature);
+//
+//                return properties.deviceType() == VK_PHYSICAL_DEVICE_TYPE_DISCRETE_GPU &&
+//                        feature.geometryShader();
+//            }
+            // using queuefamily
+            QueueFamilyIndices indices = findQueueFamilyIndices(device);
+            return indices.isComplete();
+        }
+
+        private QueueFamilyIndices findQueueFamilyIndices(VkPhysicalDevice device) {
+            QueueFamilyIndices indices = new QueueFamilyIndices();
+            try (MemoryStack stack = stackPush()) {
+                IntBuffer queueFamilyCount = stack.ints(0);
+                vkGetPhysicalDeviceQueueFamilyProperties(device, queueFamilyCount, null);
+                VkQueueFamilyProperties.Buffer propertiesBufferStruct = VkQueueFamilyProperties.malloc(queueFamilyCount.get(0), stack);
+                vkGetPhysicalDeviceQueueFamilyProperties(device, queueFamilyCount, propertiesBufferStruct); // 把 GPU 的 driver 裡的 Queue Family 的屬性拿出來用
+
+                for (int i = 0; i < propertiesBufferStruct.capacity(); i++) {
+                    if ((propertiesBufferStruct.get(i).queueFlags() & VK_QUEUE_GRAPHICS_BIT) != 0) {
+                        indices.graphicsFamily = i;
+                        System.out.println("Found Family ID: " + i + " that can do graphics");
+                    }
+
+                    if (indices.isComplete()) break;
+                }
+            }
+
+            return indices;
+        }
+
+        private void createLogicalDevice() {
+            QueueFamilyIndices indices = findQueueFamilyIndices(physicalDevice);
+
+            try (MemoryStack stack = stackPush()) {
+                VkDeviceQueueCreateInfo.Buffer queueCreateInfos = VkDeviceQueueCreateInfo.calloc(1, stack);
+                queueCreateInfos.sType(VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO); // sType 讓 pNext 可以知道他是什麼擴充 pNext 是 void* 只是個萬用指標
+                queueCreateInfos.queueFamilyIndex(indices.graphicsFamily);
+                queueCreateInfos.pQueuePriorities(stack.floats(1.0f)); // 可以用 stack.floats(0.5f, 1.0f, 1.5f) 這樣就有三個queue 各自有不同的 priority
+
+                VkPhysicalDeviceFeatures features = VkPhysicalDeviceFeatures.calloc(stack); // leave it empty
+
+                VkDeviceCreateInfo createInfo = VkDeviceCreateInfo.calloc(stack);
+                createInfo.sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
+                createInfo.pQueueCreateInfos(queueCreateInfos);
+                createInfo.pEnabledFeatures(features);
+
+                // optional, newer vulcan versions ignores this
+                if (ENABLE_VALIDATION_LAYERS) {
+                    PointerBuffer layers = stack.callocPointer(VALIDATION_LAYERS.size());
+                    for (String layerName : VALIDATION_LAYERS) {
+                        ByteBuffer bufferLayerName = stack.UTF8(layerName);
+                        layers.put(bufferLayerName);
+                    }
+                    layers.rewind();
+                    createInfo.ppEnabledLayerNames(layers);
+                }
+
+                PointerBuffer deviceBuffer = stack.callocPointer(1);
+                if (vkCreateDevice(physicalDevice, createInfo, null, deviceBuffer) != VK_SUCCESS) { // Vulcan API 製造出來的 object 的 memory location
+                    throw new RuntimeException("failed to create logical device!");
+                }
+
+                device = new VkDevice(deviceBuffer.get(0), physicalDevice, createInfo); // 存進這個 java 的 wrapper
+                PointerBuffer graphicsQueueBuffer = stack.callocPointer(1);
+                vkGetDeviceQueue(device, indices.graphicsFamily, 0, graphicsQueueBuffer);
+                graphicsQueue = new VkQueue(graphicsQueueBuffer.get(0), device);
+            }
         }
 
     }
