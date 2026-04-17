@@ -9,15 +9,23 @@ import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
 import java.util.HashSet;
+import java.util.Iterator;
 import java.util.Set;
 import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
+import static java.util.stream.Collectors.toSet;
 import static org.lwjgl.glfw.GLFW.*;
+import static org.lwjgl.glfw.GLFWVulkan.glfwCreateWindowSurface;
 import static org.lwjgl.glfw.GLFWVulkan.glfwGetRequiredInstanceExtensions;
 import static org.lwjgl.system.MemoryStack.create;
 import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.*;
 import static org.lwjgl.vulkan.EXTDebugUtils.*;
+import static org.lwjgl.vulkan.KHRSurface.vkGetPhysicalDeviceSurfaceSupportKHR;
+import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRWin32Surface.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
+import static org.lwjgl.vulkan.KHRWin32Surface.vkGetPhysicalDeviceWin32PresentationSupportKHR;
 import static org.lwjgl.vulkan.VK10.*;
 import static org.lwjgl.system.Configuration.DEBUG;
 
@@ -42,11 +50,14 @@ public class Main {
             }
         }
 
-        private class QueueFamilyIndices {
-            public Integer graphicsFamily; // 專門做 graphics 的 indice // 像是 c++ 的 optional 如果 null 則沒有值
+        private static final Set<String> DEVICE_EXTENSIONS = Stream.of(VK_KHR_SWAPCHAIN_EXTENSION_NAME)
+                .collect(toSet());
 
+        private class QueueFamilyIndices {
+            public Integer graphicsFamily;// 專門做 graphics 的 indice // 像是 c++ 的 optional 如果 null 則沒有值
+            public Integer presentFamily; // 專門顯示的 Family Queue 可以做 graphics 不代表可以顯示
             public boolean isComplete() {
-                return graphicsFamily != null;
+                return graphicsFamily != null && presentFamily != null;
             }
         }
 
@@ -76,6 +87,8 @@ public class Main {
         private VkPhysicalDevice physicalDevice;
         private VkDevice device;
         private VkQueue graphicsQueue;
+        private VkQueue presentQueue;
+        private long surface; // 可調整的會回傳一個pointer 不可調整只會回傳一個uint64 pointer在java端有各自的wrapper uint64則無
 
         // ======= METHODS ======= //
 
@@ -109,6 +122,7 @@ public class Main {
         private void initVulkan() {
             createInstance();
             setupDebugMessenger(); // 這導致這個 debugMessenger不能debug createInstance的東西
+            createSurface(); // surface 會影響 device 選擇
             pickPhysicalDevice();
             createLogicalDevice();
         }
@@ -127,6 +141,7 @@ public class Main {
             if(ENABLE_VALIDATION_LAYERS) {
                 destroyDebugUtilsMessengerEXT(instance, debugMessenger, null); // test remove
             }
+            KHRSurface.vkDestroySurfaceKHR(instance, surface, null);
             vkDestroyInstance(instance, null);
             // juts cleanup everything when closing window
             glfwDestroyWindow(window);
@@ -205,8 +220,8 @@ public class Main {
                 vkEnumerateInstanceLayerProperties(layerCount, availableLayers); // 拿到 availableLayers
                 Set<String> availableLayerNames = availableLayers.stream()
                         .map(VkLayerProperties::layerNameString)
-                        .collect(Collectors.toSet());
-                System.out.println("All tests available:");
+                        .collect(toSet());
+                System.out.println("All layers available:");
                 for (String name : availableLayerNames) {
                     System.out.println(name);
                 }
@@ -277,6 +292,7 @@ public class Main {
             return VK_ERROR_EXTENSION_NOT_PRESENT;
         }
 
+
         private void pickPhysicalDevice() {
             try (MemoryStack stack = stackPush()) { // push stack pointer 等到 try block 結束後會自動 pop 回來 free stack memory
                 IntBuffer deviceCount = stack.ints(0); // 預設一個準備 reference 的 int 初始直 0
@@ -302,6 +318,7 @@ public class Main {
             }
         }
 
+        // 從 device 找所有的 queue family 看看他們有沒有 graphics 與 present 功能
         private boolean isDeviceSuitable(VkPhysicalDevice device) {
             // old way
 //            try (MemoryStack stack = stackPush()) {
@@ -316,7 +333,27 @@ public class Main {
 //            }
             // using queuefamily
             QueueFamilyIndices indices = findQueueFamilyIndices(device);
-            return indices.isComplete();
+            boolean extensionSupported = checkDeviceExtensionSupport(device);
+            if (extensionSupported) {
+                System.out.println("DEVICE EXTENSIONS all supported");
+            }
+            return indices.isComplete() && extensionSupported;
+        }
+
+        private boolean checkDeviceExtensionSupport(VkPhysicalDevice device) {
+            try (MemoryStack stack = stackPush()) {
+                IntBuffer propertyCountBuffer = stack.callocInt(1);
+                vkEnumerateDeviceExtensionProperties(device, (String)null, propertyCountBuffer, null);
+                VkExtensionProperties.Buffer properties = VkExtensionProperties.calloc(propertyCountBuffer.get(0), stack);
+                vkEnumerateDeviceExtensionProperties(device, (String)null, propertyCountBuffer, properties);
+
+                return properties.stream()
+                        .map(VkExtensionProperties::extensionNameString)
+                        .collect(toSet())
+                        .containsAll(DEVICE_EXTENSIONS);
+
+                // DEVICE EXTENSION 是 properties 的子集合
+            }
         }
 
         private QueueFamilyIndices findQueueFamilyIndices(VkPhysicalDevice device) {
@@ -333,6 +370,13 @@ public class Main {
                         System.out.println("Found Family ID: " + i + " that can do graphics");
                     }
 
+                    IntBuffer supportsKHR = stack.callocInt(1);
+                    vkGetPhysicalDeviceSurfaceSupportKHR(device, i, surface, supportsKHR);
+                    if (supportsKHR.get(0) == VK_TRUE) {
+                        indices.presentFamily = i;
+                        System.out.println("Found Family ID: " + i + " that can do present");
+                    }
+
                     if (indices.isComplete()) break;
                 }
             }
@@ -344,10 +388,20 @@ public class Main {
             QueueFamilyIndices indices = findQueueFamilyIndices(physicalDevice);
 
             try (MemoryStack stack = stackPush()) {
-                VkDeviceQueueCreateInfo.Buffer queueCreateInfos = VkDeviceQueueCreateInfo.calloc(1, stack);
-                queueCreateInfos.sType(VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO); // sType 讓 pNext 可以知道他是什麼擴充 pNext 是 void* 只是個萬用指標
-                queueCreateInfos.queueFamilyIndex(indices.graphicsFamily);
-                queueCreateInfos.pQueuePriorities(stack.floats(1.0f)); // 可以用 stack.floats(0.5f, 1.0f, 1.5f) 這樣就有三個queue 各自有不同的 priority
+                Set<Integer> uniqueQueueFamilies = new HashSet<>();
+                uniqueQueueFamilies.add(indices.graphicsFamily);
+                uniqueQueueFamilies.add(indices.presentFamily);
+                Iterator<Integer> uniqueQueueFamiliesIterator = uniqueQueueFamilies.iterator();
+
+                VkDeviceQueueCreateInfo.Buffer queueCreateInfos = VkDeviceQueueCreateInfo.calloc(uniqueQueueFamilies.size(), stack);
+
+                for (int i = 0; i < uniqueQueueFamilies.size(); i++) {
+                    VkDeviceQueueCreateInfo queueCreateInfo = queueCreateInfos.get(i);
+                    queueCreateInfo.sType(VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO); // sType 讓 pNext 可以知道他是什麼擴充 pNext 是 void* 只是個萬用指標
+                    queueCreateInfo.queueFamilyIndex(uniqueQueueFamiliesIterator.next());
+                    queueCreateInfo.pQueuePriorities(stack.floats(1.0f)); // 可以用 stack.floats(0.5f, 1.0f, 1.5f) 這樣就有三個queue 各自有不同的 priority
+                }
+                queueCreateInfos.rewind();
 
                 VkPhysicalDeviceFeatures features = VkPhysicalDeviceFeatures.calloc(stack); // leave it empty
 
@@ -355,6 +409,14 @@ public class Main {
                 createInfo.sType(VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO);
                 createInfo.pQueueCreateInfos(queueCreateInfos);
                 createInfo.pEnabledFeatures(features);
+
+                // 有 instance extension 跟 device extension
+                // device extension 專門做 GPU 渲染的 extension
+                // 這裡的 swap chain 跟渲染有關 所以是 device 的
+                PointerBuffer deviceExtensionsBuffer = stack.callocPointer(DEVICE_EXTENSIONS.size());
+                DEVICE_EXTENSIONS.stream().map(stack::UTF8).forEach(deviceExtensionsBuffer::put);
+                deviceExtensionsBuffer.rewind();
+                createInfo.ppEnabledExtensionNames(deviceExtensionsBuffer);
 
                 // optional, newer vulcan versions ignores this
                 if (ENABLE_VALIDATION_LAYERS) {
@@ -374,8 +436,22 @@ public class Main {
 
                 device = new VkDevice(deviceBuffer.get(0), physicalDevice, createInfo); // 存進這個 java 的 wrapper
                 PointerBuffer graphicsQueueBuffer = stack.callocPointer(1);
-                vkGetDeviceQueue(device, indices.graphicsFamily, 0, graphicsQueueBuffer);
+                PointerBuffer presentQueueBuffer = stack.callocPointer(1);
+                vkGetDeviceQueue(device, indices.graphicsFamily, 0, graphicsQueueBuffer); // queueIndex 決定使用 logical queue 的第幾個 queue
                 graphicsQueue = new VkQueue(graphicsQueueBuffer.get(0), device);
+                vkGetDeviceQueue(device, indices.presentFamily, 0, presentQueueBuffer);
+                presentQueue = new VkQueue(presentQueueBuffer.get(0), device);
+            }
+        }
+
+        private void createSurface() {
+            try (MemoryStack stack = stackPush()) {
+                LongBuffer surfaceBuffer = stack.callocLong(1);
+                if (glfwCreateWindowSurface(instance, window, null, surfaceBuffer) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to create window surface!");
+                }
+
+                surface = surfaceBuffer.get(0);
             }
         }
 
