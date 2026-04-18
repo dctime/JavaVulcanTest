@@ -98,6 +98,7 @@ public class Main {
         private List<Long> swapChainImages; // automatically cleared by swap chain
         private int swapChainFormat;
         private VkExtent2D swapChainExtent;
+        private List<Long> swapChainImageViews;
 
 
 
@@ -137,6 +138,7 @@ public class Main {
             pickPhysicalDevice();
             createLogicalDevice();
             createSwapChain();
+            createImageView();
         }
 
         private void mainLoop() {
@@ -148,6 +150,9 @@ public class Main {
         }
 
         private void cleanup() {
+            for (int i = 0; i < swapChainImageViews.size(); i++) {
+                vkDestroyImageView(device, swapChainImageViews.get(i), null);
+            }
             // swap chain 需要先被 destroy 因為他需要 device
             vkDestroySwapchainKHR(device, swapChain, null);
             // device 需要先銷毀因他需要 instance
@@ -498,8 +503,8 @@ public class Main {
 
         private VkSurfaceFormatKHR chooseSwapSurfaceFormat(VkSurfaceFormatKHR.Buffer availableFormats) {
             for (VkSurfaceFormatKHR availableFormat : availableFormats) {
-                if (availableFormat.format() == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
-                    System.out.println("surface format uses VK_FORMAT_B8G8R8A8_SRGB and VK_COLOR_SPACE_SRGB_NONLINEAR_KHR");
+                if (availableFormat.format() == VK_FORMAT_B8G8R8_UNORM && availableFormat.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                    System.out.println("surface format uses VK_FORMAT_B8G8R8_UNORM (not VK_FORMAT_B8G8R8A8_SRGB) and VK_COLOR_SPACE_SRGB_NONLINEAR_KHR");
                     return availableFormat;
                 }
             }
@@ -587,7 +592,7 @@ public class Main {
                 vkGetSwapchainImagesKHR(device, swapChain, imageCountBuffer, null);
                 LongBuffer swapChainImagesBuffer = stack.callocLong(imageCountBuffer.get(0));
                 vkGetSwapchainImagesKHR(device, swapChain, imageCountBuffer, swapChainImagesBuffer);
-                System.out.println("SwapChain Image Count: " + imageCountBuffer.get(0));
+                System.out.println("SwapChain Image Count: " + imageCountBuffer.get(0)); // 一張 GPU 在畫 一張 等待顯示 一張顯示在螢幕上
                 swapChainImages = new ArrayList<>(imageCountBuffer.get(0));
                 for (int i = 0; i < imageCountBuffer.get(0); i++) {
                     swapChainImages.add(swapChainImagesBuffer.get(i));
@@ -596,6 +601,37 @@ public class Main {
                 swapChainFormat = surfaceFormatKHR.format();
                 swapChainExtent = swapExtent;
 
+            }
+        }
+
+        private void createImageView() {
+            try (MemoryStack stack = stackPush()) {
+                swapChainImageViews = new ArrayList<>(swapChainImages.size());
+                for (int i = 0; i < swapChainImages.size(); i++) {
+                    VkImageViewCreateInfo createInfo = VkImageViewCreateInfo.calloc(stack);
+                    createInfo.sType(VK_STRUCTURE_TYPE_IMAGE_VIEW_CREATE_INFO);
+                    createInfo.image(swapChainImages.get(i));
+                    createInfo.viewType(VK_IMAGE_VIEW_TYPE_2D);
+                    createInfo.format(swapChainFormat);
+                    VkComponentMapping mapping = VkComponentMapping.calloc(stack);
+                    mapping.r(VK_COMPONENT_SWIZZLE_IDENTITY);
+                    mapping.g(VK_COMPONENT_SWIZZLE_IDENTITY);
+                    mapping.b(VK_COMPONENT_SWIZZLE_IDENTITY);
+                    mapping.a(VK_COMPONENT_SWIZZLE_IDENTITY); // RGBA 順序不改
+                    createInfo.components(mapping);
+                    VkImageSubresourceRange range = VkImageSubresourceRange.calloc(stack);
+                    range.aspectMask(VK_IMAGE_ASPECT_COLOR_BIT); // 他是顏色不是 depth 之類的
+                    range.baseMipLevel(0);
+                    range.levelCount(1); // 根據遠近 resolution 會變小的材質的數量 這裡是 1
+                    range.baseArrayLayer(0);
+                    range.layerCount(1); // 其他 VR 之類的用途 這裡是 2D 渲染 疊一張 RGB 就夠了
+                    createInfo.subresourceRange(range);
+                    LongBuffer view = stack.callocLong(1);
+                    if (vkCreateImageView(device, createInfo, null, view) != VK_SUCCESS) {
+                        throw new RuntimeException("failed to create image views!");
+                    }
+                    swapChainImageViews.add(view.get(0));
+                }
             }
         }
 
