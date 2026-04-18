@@ -8,9 +8,7 @@ import org.lwjgl.vulkan.*;
 import java.nio.ByteBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
-import java.util.HashSet;
-import java.util.Iterator;
-import java.util.Set;
+import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
 
@@ -23,7 +21,7 @@ import static org.lwjgl.system.MemoryStack.stackPush;
 import static org.lwjgl.system.MemoryUtil.*;
 import static org.lwjgl.vulkan.EXTDebugUtils.*;
 import static org.lwjgl.vulkan.KHRSurface.*;
-import static org.lwjgl.vulkan.KHRSwapchain.VK_KHR_SWAPCHAIN_EXTENSION_NAME;
+import static org.lwjgl.vulkan.KHRSwapchain.*;
 import static org.lwjgl.vulkan.KHRWin32Surface.VK_STRUCTURE_TYPE_WIN32_SURFACE_CREATE_INFO_KHR;
 import static org.lwjgl.vulkan.KHRWin32Surface.vkGetPhysicalDeviceWin32PresentationSupportKHR;
 import static org.lwjgl.vulkan.VK10.*;
@@ -62,7 +60,7 @@ public class Main {
         }
 
         private class SwapChainSupportDetails {
-            private VkSurfaceCapabilitiesKHR capabilities;
+            private VkSurfaceCapabilitiesKHR.Buffer capabilities;
             private VkSurfaceFormatKHR.Buffer formats;
             private IntBuffer presentModes;
 
@@ -96,6 +94,12 @@ public class Main {
         private VkQueue graphicsQueue;
         private VkQueue presentQueue;
         private long surface; // 可調整的會回傳一個pointer 不可調整只會回傳一個uint64 pointer在java端有各自的wrapper uint64則無
+        private long swapChain;
+        private List<Long> swapChainImages; // automatically cleared by swap chain
+        private int swapChainFormat;
+        private VkExtent2D swapChainExtent;
+
+
 
         // ======= METHODS ======= //
 
@@ -132,6 +136,7 @@ public class Main {
             createSurface(); // surface 會影響 device 選擇
             pickPhysicalDevice();
             createLogicalDevice();
+            createSwapChain();
         }
 
         private void mainLoop() {
@@ -143,6 +148,8 @@ public class Main {
         }
 
         private void cleanup() {
+            // swap chain 需要先被 destroy 因為他需要 device
+            vkDestroySwapchainKHR(device, swapChain, null);
             // device 需要先銷毀因他需要 instance
             vkDestroyDevice(device, null); // physical device 不需要 free 因為 physical 是 vulcan 列舉出來記憶體位置給我們選 不是我們建立的
             if(ENABLE_VALIDATION_LAYERS) {
@@ -473,8 +480,8 @@ public class Main {
 
         private SwapChainSupportDetails querySwapChainSupport(MemoryStack stack, VkPhysicalDevice device) {
             SwapChainSupportDetails details = new SwapChainSupportDetails();
-            details.capabilities = VkSurfaceCapabilitiesKHR.calloc(stack);
-            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, details.capabilities);
+            details.capabilities = VkSurfaceCapabilitiesKHR.calloc(1, stack);
+            vkGetPhysicalDeviceSurfaceCapabilitiesKHR(device, surface, details.capabilities.get(0));
             IntBuffer formatCount = stack.callocInt(1);
             vkGetPhysicalDeviceSurfaceFormatsKHR(device, surface, formatCount, null);
             details.formats = VkSurfaceFormatKHR.calloc(formatCount.get(0), stack);
@@ -492,6 +499,7 @@ public class Main {
         private VkSurfaceFormatKHR chooseSwapSurfaceFormat(VkSurfaceFormatKHR.Buffer availableFormats) {
             for (VkSurfaceFormatKHR availableFormat : availableFormats) {
                 if (availableFormat.format() == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                    System.out.println("surface format uses VK_FORMAT_B8G8R8A8_SRGB and VK_COLOR_SPACE_SRGB_NONLINEAR_KHR");
                     return availableFormat;
                 }
             }
@@ -523,6 +531,72 @@ public class Main {
             actualExtent.width(Math.min(Math.max(width.get(0), capabilities.minImageExtent().width()), capabilities.maxImageExtent().width()));
             actualExtent.height(Math.min(Math.max(height.get(0), capabilities.minImageExtent().height()), capabilities.maxImageExtent().height()));
             return actualExtent;
+        }
+
+        private void createSwapChain() {
+            try (MemoryStack stack = stackPush()) {
+                SwapChainSupportDetails details = querySwapChainSupport(stack, physicalDevice);
+
+                VkSurfaceFormatKHR surfaceFormatKHR = chooseSwapSurfaceFormat(details.formats);
+                int swapPresentMode = chooseSwapPresentMode(details.presentModes);
+                VkExtent2D swapExtent = chooseSwapExtent(stack, details.capabilities);
+
+                int imageCount =  details.capabilities.minImageCount() + 1;
+                // maxImageCount = 0 => there is no max image count
+                if (details.capabilities.maxImageCount() > 0 && imageCount > details.capabilities.maxImageCount()) {
+                    imageCount = details.capabilities.maxImageCount();
+                }
+
+                VkSwapchainCreateInfoKHR createInfo = VkSwapchainCreateInfoKHR.calloc(stack);
+                createInfo.sType(VK_STRUCTURE_TYPE_SWAPCHAIN_CREATE_INFO_KHR);
+                createInfo.surface(surface);
+                createInfo.minImageCount(imageCount);
+
+                createInfo.imageColorSpace(surfaceFormatKHR.colorSpace());
+                createInfo.imageExtent(swapExtent);
+                createInfo.imageArrayLayers(1); // just 2d images, not 1 if create 3d movies
+                createInfo.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT); // 變成顏色渲染目標
+                System.out.println("DEBUG: IMAGE USGAE: " + createInfo.imageUsage());
+                createInfo.imageFormat(surfaceFormatKHR.format());
+
+                QueueFamilyIndices indices = findQueueFamilyIndices(physicalDevice);
+                if (indices.graphicsFamily != indices.presentFamily) {
+                    IntBuffer queueFamilyIndices = stack.ints(indices.graphicsFamily, indices.presentFamily);
+                    createInfo.imageSharingMode(VK_SHARING_MODE_CONCURRENT); // 不需要轉交所有權image這個檔案就可以在不同的queue 比較慢
+                    createInfo.queueFamilyIndexCount(2);
+                    createInfo.pQueueFamilyIndices(queueFamilyIndices);
+                } else {
+                    createInfo.imageSharingMode(VK_SHARING_MODE_EXCLUSIVE); // image給其他queue時需要轉交所有權
+                    // 同個 queue family 資料溝通不需要轉交所有權
+                }
+                createInfo.preTransform(details.capabilities.currentTransform()); // 不去旋轉任何東西
+                createInfo.compositeAlpha(VK_COMPOSITE_ALPHA_OPAQUE_BIT_KHR);
+                createInfo.presentMode(swapPresentMode);
+                createInfo.clipped(true); // 如果前面有視窗擋住 後面的 pixels 直接忽略
+                createInfo.oldSwapchain(VK_NULL_HANDLE); // 如果 resize window 那 swap chain 需要換 目前不換
+
+                LongBuffer swapChainBuffer = stack.callocLong(1);
+                if (vkCreateSwapchainKHR(device, createInfo, null, swapChainBuffer) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to create swap chain!");
+                }
+
+                swapChain = swapChainBuffer.get(0);
+                System.out.println("SwapChain created! handler: " + swapChain);
+
+                IntBuffer imageCountBuffer = stack.callocInt(1);
+                vkGetSwapchainImagesKHR(device, swapChain, imageCountBuffer, null);
+                LongBuffer swapChainImagesBuffer = stack.callocLong(imageCountBuffer.get(0));
+                vkGetSwapchainImagesKHR(device, swapChain, imageCountBuffer, swapChainImagesBuffer);
+                System.out.println("SwapChain Image Count: " + imageCountBuffer.get(0));
+                swapChainImages = new ArrayList<>(imageCountBuffer.get(0));
+                for (int i = 0; i < imageCountBuffer.get(0); i++) {
+                    swapChainImages.add(swapChainImagesBuffer.get(i));
+                }
+
+                swapChainFormat = surfaceFormatKHR.format();
+                swapChainExtent = swapExtent;
+
+            }
         }
 
     }
