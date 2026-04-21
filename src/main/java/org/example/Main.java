@@ -3,11 +3,17 @@ package org.example;
 // glfw for showing something on the screen. Optional
 import org.lwjgl.PointerBuffer;
 import org.lwjgl.system.MemoryStack;
+import org.lwjgl.system.MemoryUtil;
 import org.lwjgl.vulkan.*;
 
+import java.io.IOException;
+import java.io.InputStream;
 import java.nio.ByteBuffer;
+import java.nio.CharBuffer;
 import java.nio.IntBuffer;
 import java.nio.LongBuffer;
+import java.nio.file.Files;
+import java.nio.file.Paths;
 import java.util.*;
 import java.util.stream.Collectors;
 import java.util.stream.Stream;
@@ -100,7 +106,6 @@ public class Main {
         private VkExtent2D swapChainExtent;
         private List<Long> swapChainImageViews;
         private long pipelineLayout;
-
 
 
         // ======= METHODS ======= //
@@ -638,8 +643,58 @@ public class Main {
             }
         }
 
+        private long createShaderModule(MemoryStack stack, ByteBuffer codeBuffer) {
+            VkShaderModuleCreateInfo createInfo = VkShaderModuleCreateInfo.calloc(stack);
+            createInfo.sType(VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO);
+            createInfo.pCode(codeBuffer);
+            LongBuffer shaderModuleBuffer = stack.callocLong(1);
+            if (vkCreateShaderModule(device, createInfo, null, shaderModuleBuffer) != VK_SUCCESS) {
+                throw new RuntimeException("failed to create shader module!");
+            }
+            return shaderModuleBuffer.get(0);
+        }
+
+        // 要記得 MemoryUtils memFree buffer
+        private static ByteBuffer readShaderFile(MemoryStack stack, String filename) throws IOException {
+            byte[] bytes = Files.readAllBytes(Paths.get(filename));
+            ByteBuffer buffer = stack.calloc(bytes.length);
+            buffer.put(bytes);
+            buffer.flip();
+            return buffer;
+        }
+
         private void createGraphicsPipeline() {
             try (MemoryStack stack = stackPush()) {
+                ByteBuffer vertCodeBuffer;
+                ByteBuffer fragCodeBuffer;
+                try {
+                    vertCodeBuffer = readShaderFile(stack, "shaders/vert.spv");
+                    fragCodeBuffer = readShaderFile(stack, "shaders/frag.spv");
+                } catch (IOException e) {
+                    System.out.println("Cannot read shader file");
+                    return;
+                }
+
+                long vertShaderModule = createShaderModule(stack, vertCodeBuffer);
+                long fragShaderModule = createShaderModule(stack, fragCodeBuffer);
+
+                VkPipelineShaderStageCreateInfo.Buffer vertShaderStageInfo = VkPipelineShaderStageCreateInfo.calloc(1, stack);
+                vertShaderStageInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
+                vertShaderStageInfo.stage(VK_SHADER_STAGE_VERTEX_BIT); // vertex shader
+                vertShaderStageInfo.module(vertShaderModule);
+                vertShaderStageInfo.pName(stack.UTF8("main")); // shader file 裡的 entry point
+
+                VkPipelineShaderStageCreateInfo.Buffer fragShaderStageInfo = VkPipelineShaderStageCreateInfo.calloc(1, stack);
+                fragShaderStageInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO);
+                fragShaderStageInfo.stage(VK_SHADER_STAGE_FRAGMENT_BIT); // fragment shader
+                fragShaderStageInfo.module(fragShaderModule);
+                fragShaderStageInfo.pName(stack.UTF8("main"));
+
+                VkPipelineShaderStageCreateInfo.Buffer shaderStages = VkPipelineShaderStageCreateInfo.calloc(2, stack);
+                shaderStages.put(vertShaderStageInfo);
+                shaderStages.put(fragShaderStageInfo);
+                shaderStages.rewind();
+
                 // pipeline: input vertex -> vertex shader -> rasterization -> fragment shader -> color blending -> framebuffer
                 // 一些可以在 pipeline 建立後可以改變的設定
 //                IntBuffer dynamicStates = stack.ints(
@@ -726,6 +781,9 @@ public class Main {
                 }
 
                 pipelineLayout = pipelineLayoutBuffer.get(0);
+
+                vkDestroyShaderModule(device, vertShaderModule, null);
+                vkDestroyShaderModule(device, fragShaderModule, null);
             }
 
         }
