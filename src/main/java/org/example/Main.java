@@ -99,6 +99,7 @@ public class Main {
         private int swapChainFormat;
         private VkExtent2D swapChainExtent;
         private List<Long> swapChainImageViews;
+        private long pipelineLayout;
 
 
 
@@ -139,6 +140,7 @@ public class Main {
             createLogicalDevice();
             createSwapChain();
             createImageView();
+            createGraphicsPipeline();
         }
 
         private void mainLoop() {
@@ -150,6 +152,7 @@ public class Main {
         }
 
         private void cleanup() {
+            vkDestroyPipelineLayout(device, pipelineLayout, null);
             for (int i = 0; i < swapChainImageViews.size(); i++) {
                 vkDestroyImageView(device, swapChainImageViews.get(i), null);
             }
@@ -633,6 +636,98 @@ public class Main {
                     swapChainImageViews.add(view.get(0));
                 }
             }
+        }
+
+        private void createGraphicsPipeline() {
+            try (MemoryStack stack = stackPush()) {
+                // pipeline: input vertex -> vertex shader -> rasterization -> fragment shader -> color blending -> framebuffer
+                // 一些可以在 pipeline 建立後可以改變的設定
+//                IntBuffer dynamicStates = stack.ints(
+//                        VK_DYNAMIC_STATE_VIEWPORT,
+//                        VK_DYNAMIC_STATE_SCISSOR
+//                );
+//                VkPipelineDynamicStateCreateInfo dynamicState = VkPipelineDynamicStateCreateInfo.calloc(stack);
+//                dynamicState.sType(VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO);
+//                dynamicState.pDynamicStates(dynamicStates);
+
+                // 先把模型的 vertex 讀進來
+                VkPipelineVertexInputStateCreateInfo vertexInputInfo = VkPipelineVertexInputStateCreateInfo.calloc(stack);
+                vertexInputInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO);
+                VkVertexInputBindingDescription.Buffer vertexBindingDescriptionsBuffer = VkVertexInputBindingDescription.calloc(1, stack); // calloc to value 0 -> nullptr
+                vertexInputInfo.pVertexBindingDescriptions(vertexBindingDescriptionsBuffer);
+                VkVertexInputAttributeDescription.Buffer vertexInputAttributeDescriptionsBuffer = VkVertexInputAttributeDescription.calloc(1, stack);
+                vertexInputInfo.pVertexAttributeDescriptions(vertexInputAttributeDescriptionsBuffer);
+
+                VkPipelineInputAssemblyStateCreateInfo inputAssembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack);
+                inputAssembly.sType(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO);
+                inputAssembly.topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); // 輸進來的 vertex 都構成三角形 每三個 vertex 就是一個三角形
+                inputAssembly.primitiveRestartEnable(false);
+
+                // viewport defines the transformation to the framebuffer
+                VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
+                viewport.x(0.0f);
+                viewport.y(0.0f);
+                viewport.width(swapChainExtent.width());
+                viewport.height(swapChainExtent.height());
+                viewport.minDepth(0.0f);
+                viewport.maxDepth(1.0f);
+
+                // behaves like a scissor
+                VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
+                VkOffset2D offset = VkOffset2D.calloc(stack);
+                offset.x(0);
+                offset.y(0);
+                scissor.offset(offset);
+                scissor.extent(swapChainExtent);
+
+                VkPipelineViewportStateCreateInfo viewportState = VkPipelineViewportStateCreateInfo.calloc(stack);
+                viewportState.sType(VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO);
+                viewportState.scissorCount(1);
+                viewportState.viewportCount(1);
+                // 這裡不使用 dynamic state
+                viewportState.pViewports(viewport);
+                viewportState.pScissors(scissor);
+
+                VkPipelineRasterizationStateCreateInfo rasterizer = VkPipelineRasterizationStateCreateInfo.calloc(stack);
+                rasterizer.sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO);
+                rasterizer.depthClampEnable(false); // if true near and far were clamped (用來做 shadow map 聽說好用)
+                rasterizer.polygonMode(VK_POLYGON_MODE_FILL);
+                // 如果用 VK_POLYGON_MODE_LINE 只會畫邊邊 如果用 VK_POLYGON_MODE_POINT 只會畫 點
+                rasterizer.lineWidth(1.0f);
+                rasterizer.cullMode(VK_CULL_MODE_BACK_BIT); // 把後面的面移除掉 cull 是淘汰的意思
+                rasterizer.frontFace(VK_FRONT_FACE_CLOCKWISE); // clockwise 視為正面
+                rasterizer.depthBiasEnable(false); // 用來 shadow mapping 用的微調
+
+                // 聽說 antialiasing 會用到 先跳過
+                VkPipelineMultisampleStateCreateInfo multisampling = VkPipelineMultisampleStateCreateInfo.calloc(stack);
+                multisampling.sType(VK_STRUCTURE_TYPE_PIPELINE_MULTISAMPLE_STATE_CREATE_INFO);
+                multisampling.sampleShadingEnable(false);
+                multisampling.rasterizationSamples(VK_SAMPLE_COUNT_1_BIT);
+
+                // color bending 會把 fragment shader 跟 framebuffer 的 pixel color blend 在一起
+                // 這裡完全不開直接把 fragmentation shader 輸出直接丟進 framebuffer
+                // 這個設定跟 buffer 有關 多個buffer 就有多個設定
+                VkPipelineColorBlendAttachmentState.Buffer colorBlendAttachment = VkPipelineColorBlendAttachmentState.calloc(1, stack);
+                // 刪除一個 那個頻道的值就永遠不變 只會在初始值
+                colorBlendAttachment.colorWriteMask(VK_COLOR_COMPONENT_R_BIT | VK_COLOR_COMPONENT_G_BIT | VK_COLOR_COMPONENT_B_BIT | VK_COLOR_COMPONENT_A_BIT);
+                colorBlendAttachment.blendEnable(false);
+                // global settings
+                VkPipelineColorBlendStateCreateInfo colorBlending = VkPipelineColorBlendStateCreateInfo.calloc(stack);
+                colorBlending.sType(VK_STRUCTURE_TYPE_PIPELINE_COLOR_BLEND_STATE_CREATE_INFO);
+                colorBlending.logicOpEnable(false);
+                colorBlending.attachmentCount(1);
+                colorBlending.pAttachments(colorBlendAttachment);
+
+                VkPipelineLayoutCreateInfo pipelineLayoutInfo = VkPipelineLayoutCreateInfo.calloc(stack);
+                LongBuffer pipelineLayoutBuffer = stack.callocLong(1);
+                pipelineLayoutInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO);
+                if (vkCreatePipelineLayout(device, pipelineLayoutInfo, null, pipelineLayoutBuffer) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to create pipeline layout!");
+                }
+
+                pipelineLayout = pipelineLayoutBuffer.get(0);
+            }
+
         }
 
     }
