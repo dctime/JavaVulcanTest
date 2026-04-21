@@ -107,6 +107,7 @@ public class Main {
         private List<Long> swapChainImageViews;
         long renderPass;
         private long pipelineLayout;
+        private long pipeline;
 
 
         // ======= METHODS ======= //
@@ -159,6 +160,7 @@ public class Main {
         }
 
         private void cleanup() {
+            vkDestroyPipeline(device, pipeline, null);
             vkDestroyPipelineLayout(device, pipelineLayout, null);
             vkDestroyRenderPass(device, renderPass, null);
             for (int i = 0; i < swapChainImageViews.size(); i++) {
@@ -514,7 +516,7 @@ public class Main {
 
         private VkSurfaceFormatKHR chooseSwapSurfaceFormat(VkSurfaceFormatKHR.Buffer availableFormats) {
             for (VkSurfaceFormatKHR availableFormat : availableFormats) {
-                if (availableFormat.format() == VK_FORMAT_B8G8R8_UNORM && availableFormat.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
+                if (availableFormat.format() == VK_FORMAT_B8G8R8A8_SRGB && availableFormat.colorSpace() == VK_COLOR_SPACE_SRGB_NONLINEAR_KHR) {
                     System.out.println("surface format uses VK_FORMAT_B8G8R8_UNORM (not VK_FORMAT_B8G8R8A8_SRGB) and VK_COLOR_SPACE_SRGB_NONLINEAR_KHR");
                     return availableFormat;
                 }
@@ -699,22 +701,22 @@ public class Main {
                 shaderStages.rewind();
 
                 // pipeline: input vertex -> vertex shader -> rasterization -> fragment shader -> color blending -> framebuffer
-                // 一些可以在 pipeline 建立後可以改變的設定
-//                IntBuffer dynamicStates = stack.ints(
-//                        VK_DYNAMIC_STATE_VIEWPORT,
-//                        VK_DYNAMIC_STATE_SCISSOR
-//                );
-//                VkPipelineDynamicStateCreateInfo dynamicState = VkPipelineDynamicStateCreateInfo.calloc(stack);
-//                dynamicState.sType(VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO);
-//                dynamicState.pDynamicStates(dynamicStates);
+//                 一些可以在 pipeline 建立後可以改變的設定
+                IntBuffer dynamicStates = stack.ints(
+                        VK_DYNAMIC_STATE_VIEWPORT,
+                        VK_DYNAMIC_STATE_SCISSOR
+                );
+                VkPipelineDynamicStateCreateInfo dynamicState = VkPipelineDynamicStateCreateInfo.calloc(stack);
+                dynamicState.sType(VK_STRUCTURE_TYPE_PIPELINE_DYNAMIC_STATE_CREATE_INFO);
+                dynamicState.pDynamicStates(dynamicStates);
 
                 // 先把模型的 vertex 讀進來
                 VkPipelineVertexInputStateCreateInfo vertexInputInfo = VkPipelineVertexInputStateCreateInfo.calloc(stack);
                 vertexInputInfo.sType(VK_STRUCTURE_TYPE_PIPELINE_VERTEX_INPUT_STATE_CREATE_INFO);
-                VkVertexInputBindingDescription.Buffer vertexBindingDescriptionsBuffer = VkVertexInputBindingDescription.calloc(1, stack); // calloc to value 0 -> nullptr
-                vertexInputInfo.pVertexBindingDescriptions(vertexBindingDescriptionsBuffer);
-                VkVertexInputAttributeDescription.Buffer vertexInputAttributeDescriptionsBuffer = VkVertexInputAttributeDescription.calloc(1, stack);
-                vertexInputInfo.pVertexAttributeDescriptions(vertexInputAttributeDescriptionsBuffer);
+//                VkVertexInputBindingDescription.Buffer vertexBindingDescriptionsBuffer = VkVertexInputBindingDescription.calloc(1, stack); // calloc to value 0 -> nullptr
+//                vertexInputInfo.pVertexBindingDescriptions(vertexBindingDescriptionsBuffer);
+//                VkVertexInputAttributeDescription.Buffer vertexInputAttributeDescriptionsBuffer = VkVertexInputAttributeDescription.calloc(1, stack);
+//                vertexInputInfo.pVertexAttributeDescriptions(vertexInputAttributeDescriptionsBuffer);
 
                 VkPipelineInputAssemblyStateCreateInfo inputAssembly = VkPipelineInputAssemblyStateCreateInfo.calloc(stack);
                 inputAssembly.sType(VK_STRUCTURE_TYPE_PIPELINE_INPUT_ASSEMBLY_STATE_CREATE_INFO);
@@ -784,6 +786,30 @@ public class Main {
                 }
 
                 pipelineLayout = pipelineLayoutBuffer.get(0);
+
+                VkGraphicsPipelineCreateInfo.Buffer pipelineInfo = VkGraphicsPipelineCreateInfo.calloc(1, stack);
+                pipelineInfo.sType(VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO);
+                pipelineInfo.stageCount(2);
+                pipelineInfo.pStages(shaderStages);
+                pipelineInfo.pVertexInputState(vertexInputInfo);
+                pipelineInfo.pInputAssemblyState(inputAssembly);
+                pipelineInfo.pViewportState(viewportState);
+                pipelineInfo.pRasterizationState(rasterizer);
+                pipelineInfo.pMultisampleState(multisampling);
+                VkPipelineDepthStencilStateCreateInfo depthStencil = VkPipelineDepthStencilStateCreateInfo.calloc(stack);
+                pipelineInfo.pDepthStencilState(depthStencil);
+                pipelineInfo.pColorBlendState(colorBlending);
+                pipelineInfo.pDynamicState(dynamicState);
+
+                pipelineInfo.layout(pipelineLayout);
+                pipelineInfo.renderPass(renderPass);
+                pipelineInfo.subpass(0); // the index of the subpass. Here its color attachment
+
+                LongBuffer pipelineBuffer = stack.callocLong(1);
+                if (vkCreateGraphicsPipelines(device, VK_NULL_HANDLE, pipelineInfo, null, pipelineBuffer) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to create graphics pipeline!");
+                }
+                pipeline = pipelineBuffer.get(0);
 
                 vkDestroyShaderModule(device, vertShaderModule, null);
                 vkDestroyShaderModule(device, fragShaderModule, null);
