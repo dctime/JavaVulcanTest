@@ -109,6 +109,8 @@ public class Main {
         private long pipelineLayout;
         private long pipeline;
         private List<Long> swapChainFrameBuffers;
+        private long commandPool;
+        private long commandBuffer;
 
 
         // ======= METHODS ======= //
@@ -151,6 +153,8 @@ public class Main {
             createRenderPass();
             createGraphicsPipeline();
             createFrameBuffers();
+            createCommandPool();
+            createCommandBuffer();
         }
 
         private void mainLoop() {
@@ -162,6 +166,7 @@ public class Main {
         }
 
         private void cleanup() {
+            vkDestroyCommandPool(device, commandPool, null);
             for (long framebuffer : swapChainFrameBuffers) {
                 vkDestroyFramebuffer(device, framebuffer, null);
             }
@@ -729,30 +734,30 @@ public class Main {
                 inputAssembly.topology(VK_PRIMITIVE_TOPOLOGY_TRIANGLE_LIST); // 輸進來的 vertex 都構成三角形 每三個 vertex 就是一個三角形
                 inputAssembly.primitiveRestartEnable(false);
 
-                // viewport defines the transformation to the framebuffer
-                VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
-                viewport.x(0.0f);
-                viewport.y(0.0f);
-                viewport.width(swapChainExtent.width());
-                viewport.height(swapChainExtent.height());
-                viewport.minDepth(0.0f);
-                viewport.maxDepth(1.0f);
+                // viewport defines the transformation to the framebuffer (we set it to dynamic no need to implement here)
+//                VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
+//                viewport.x(0.0f);
+//                viewport.y(0.0f);
+//                viewport.width(swapChainExtent.width());
+//                viewport.height(swapChainExtent.height());
+//                viewport.minDepth(0.0f);
+//                viewport.maxDepth(1.0f);
 
-                // behaves like a scissor
-                VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
-                VkOffset2D offset = VkOffset2D.calloc(stack);
-                offset.x(0);
-                offset.y(0);
-                scissor.offset(offset);
-                scissor.extent(swapChainExtent);
+                // behaves like a scissor (dynamic)
+//                VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
+//                VkOffset2D offset = VkOffset2D.calloc(stack);
+//                offset.x(0);
+//                offset.y(0);
+//                scissor.offset(offset);
+//                scissor.extent(swapChainExtent);
 
                 VkPipelineViewportStateCreateInfo viewportState = VkPipelineViewportStateCreateInfo.calloc(stack);
                 viewportState.sType(VK_STRUCTURE_TYPE_PIPELINE_VIEWPORT_STATE_CREATE_INFO);
                 viewportState.scissorCount(1);
                 viewportState.viewportCount(1);
-                // 這裡不使用 dynamic state
-                viewportState.pViewports(viewport);
-                viewportState.pScissors(scissor);
+                // 這裡使用 dynamic state
+//                viewportState.pViewports(viewport);
+//                viewportState.pScissors(scissor);
 
                 VkPipelineRasterizationStateCreateInfo rasterizer = VkPipelineRasterizationStateCreateInfo.calloc(stack);
                 rasterizer.sType(VK_STRUCTURE_TYPE_PIPELINE_RASTERIZATION_STATE_CREATE_INFO);
@@ -878,6 +883,93 @@ public class Main {
                         throw new RuntimeException("failed to create framebuffer!");
                     }
                     swapChainFrameBuffers.add(framebuffer.get(0));
+                }
+            }
+        }
+
+        private void createCommandPool() {
+            QueueFamilyIndices queueFamilyIndices = findQueueFamilyIndices(physicalDevice);
+            try (MemoryStack stack = stackPush()) {
+                VkCommandPoolCreateInfo poolInfo = VkCommandPoolCreateInfo.calloc(stack);
+                poolInfo.sType(VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO);
+                poolInfo.flags(VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT);
+
+                LongBuffer commandPoolBuffer = stack.callocLong(1);
+                if (vkCreateCommandPool(device, poolInfo, null, commandPoolBuffer) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to create command pool!");
+                }
+
+                commandPool = commandPoolBuffer.get(0);
+            }
+        }
+
+        private void createCommandBuffer() {
+            try (MemoryStack stack = stackPush()) {
+                VkCommandBufferAllocateInfo allocInfo = VkCommandBufferAllocateInfo.calloc(stack);
+
+                allocInfo.sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_ALLOCATE_INFO);
+                allocInfo.commandPool(commandPool);
+                allocInfo.level(VK_COMMAND_BUFFER_LEVEL_PRIMARY); // 可以直接叫他做事
+                allocInfo.commandBufferCount(1);
+
+                PointerBuffer commandBufferPointer = stack.callocPointer(1);
+                if (vkAllocateCommandBuffers(device, allocInfo, commandBufferPointer) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to allocate command buffers!");
+                }
+
+                commandBuffer = commandBufferPointer.get(0);
+            }
+        }
+
+        private void recordCommandBuffer(VkCommandBuffer commandBuffer, int imageIndex) {
+            try (MemoryStack stack = stackPush()) {
+                VkCommandBufferBeginInfo beginInfo = VkCommandBufferBeginInfo.calloc(stack);
+
+                beginInfo.sType(VK_STRUCTURE_TYPE_COMMAND_BUFFER_BEGIN_INFO);
+
+                if (vkBeginCommandBuffer(commandBuffer, beginInfo) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to begin recording command buffer!");
+                }
+
+                VkRenderPassBeginInfo renderPassInfo = VkRenderPassBeginInfo.calloc(stack);
+                renderPassInfo.sType(VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO);
+                renderPassInfo.renderPass(renderPass);
+                renderPassInfo.framebuffer(swapChainFrameBuffers.get(imageIndex));
+                VkOffset2D offset = VkOffset2D.calloc(stack);
+                offset.x(0);
+                offset.y(0);
+                renderPassInfo.renderArea().offset(offset);
+                renderPassInfo.renderArea().extent(swapChainExtent);
+                VkClearValue.Buffer clearColor = VkClearValue.calloc(1, stack);
+                clearColor.color().float32(0, 0.0f).float32(1, 0.0f).float32(2, 0.0f).float32(3, 1.0f);
+                renderPassInfo.clearValueCount(1);
+                renderPassInfo.pClearValues(clearColor);
+
+                vkCmdBeginRenderPass(commandBuffer, renderPassInfo, VK_SUBPASS_CONTENTS_INLINE);
+                vkCmdBindPipeline(commandBuffer, VK_PIPELINE_BIND_POINT_GRAPHICS, pipeline);
+
+                // viewport defines the transformation to the framebuffer
+                VkViewport.Buffer viewport = VkViewport.calloc(1, stack);
+                viewport.x(0.0f);
+                viewport.y(0.0f);
+                viewport.width(swapChainExtent.width());
+                viewport.height(swapChainExtent.height());
+                viewport.minDepth(0.0f);
+                viewport.maxDepth(1.0f);
+                vkCmdSetViewport(commandBuffer, 0, viewport);
+
+                // behaves like a scissor
+                VkRect2D.Buffer scissor = VkRect2D.calloc(1, stack);
+                VkOffset2D scissorOffset = VkOffset2D.calloc(stack);
+                scissorOffset.x(0);
+                scissorOffset.y(0);
+                scissor.offset(scissorOffset);
+                scissor.extent(swapChainExtent);
+                vkCmdSetScissor(commandBuffer, 0, scissor);
+
+                vkCmdEndRenderPass(commandBuffer);
+                if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to record command buffer!");
                 }
             }
         }
