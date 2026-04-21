@@ -668,8 +668,8 @@ public class Main {
                 ByteBuffer vertCodeBuffer;
                 ByteBuffer fragCodeBuffer;
                 try {
-                    vertCodeBuffer = readShaderFile(stack, "shaders/vert.spv");
-                    fragCodeBuffer = readShaderFile(stack, "shaders/frag.spv");
+                    vertCodeBuffer = readShaderFile(stack, "src/main/java/org/example/shaders/vert.spv");
+                    fragCodeBuffer = readShaderFile(stack, "src/main/java/org/example/shaders/frag.spv");
                 } catch (IOException e) {
                     System.out.println("Cannot read shader file");
                     return;
