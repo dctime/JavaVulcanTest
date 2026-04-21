@@ -105,6 +105,7 @@ public class Main {
         private int swapChainFormat;
         private VkExtent2D swapChainExtent;
         private List<Long> swapChainImageViews;
+        long renderPass;
         private long pipelineLayout;
 
 
@@ -145,6 +146,7 @@ public class Main {
             createLogicalDevice();
             createSwapChain();
             createImageView();
+            createRenderPass();
             createGraphicsPipeline();
         }
 
@@ -158,6 +160,7 @@ public class Main {
 
         private void cleanup() {
             vkDestroyPipelineLayout(device, pipelineLayout, null);
+            vkDestroyRenderPass(device, renderPass, null);
             for (int i = 0; i < swapChainImageViews.size(); i++) {
                 vkDestroyImageView(device, swapChainImageViews.get(i), null);
             }
@@ -786,6 +789,42 @@ public class Main {
                 vkDestroyShaderModule(device, fragShaderModule, null);
             }
 
+        }
+
+        // 整個渲染過程的設定
+        private void createRenderPass() {
+            try (MemoryStack stack = stackPush()) {
+                // attachment 描述  framebuffer 也就是 ImageView
+                VkAttachmentDescription.Buffer colorAttachment = VkAttachmentDescription.calloc(1, stack);
+                colorAttachment.format(swapChainFormat);
+                colorAttachment.samples(VK_SAMPLE_COUNT_1_BIT); // 沒有用 multisampling
+                colorAttachment.loadOp(VK_ATTACHMENT_LOAD_OP_CLEAR); // 一開始這個 framebuffer 是黑的全0
+                colorAttachment.storeOp(VK_ATTACHMENT_STORE_OP_STORE); // 繼續存著 讓他繼續顯示
+                colorAttachment.initialLayout(VK_IMAGE_LAYOUT_UNDEFINED); // don't care what previous layout the image was in
+                colorAttachment.finalLayout(VK_IMAGE_LAYOUT_PRESENT_SRC_KHR); // 準備送往 swap chain
+
+                VkAttachmentReference.Buffer colorAttachmentRef = VkAttachmentReference.calloc(1, stack);
+                colorAttachmentRef.attachment(0); // index number (layout = 0) out frag shader
+                colorAttachmentRef.layout(VK_IMAGE_LAYOUT_COLOR_ATTACHMENT_OPTIMAL); // use this buffer as a color buffer
+
+                // subpass 定義 attachment 之間的互動
+                VkSubpassDescription.Buffer subpass = VkSubpassDescription.calloc(1, stack);
+                subpass.pipelineBindPoint(VK_PIPELINE_BIND_POINT_GRAPHICS); // its only a graphic subpass
+                subpass.colorAttachmentCount(1);
+                subpass.pColorAttachments(colorAttachmentRef);
+
+                VkRenderPassCreateInfo renderPassInfo = VkRenderPassCreateInfo.calloc(stack);
+                renderPassInfo.sType(VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO);
+                renderPassInfo.pAttachments(colorAttachment);
+                renderPassInfo.pSubpasses(subpass);
+
+                LongBuffer renderPassBuffer = stack.callocLong(1);
+                if (vkCreateRenderPass(device, renderPassInfo, null, renderPassBuffer) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to create render pass!");
+                }
+
+                renderPass = renderPassBuffer.get(0);
+            }
         }
 
     }
