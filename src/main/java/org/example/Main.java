@@ -108,6 +108,7 @@ public class Main {
         long renderPass;
         private long pipelineLayout;
         private long pipeline;
+        private List<Long> swapChainFrameBuffers;
 
 
         // ======= METHODS ======= //
@@ -149,6 +150,7 @@ public class Main {
             createImageView();
             createRenderPass();
             createGraphicsPipeline();
+            createFrameBuffers();
         }
 
         private void mainLoop() {
@@ -160,6 +162,9 @@ public class Main {
         }
 
         private void cleanup() {
+            for (long framebuffer : swapChainFrameBuffers) {
+                vkDestroyFramebuffer(device, framebuffer, null);
+            }
             vkDestroyPipeline(device, pipeline, null);
             vkDestroyPipelineLayout(device, pipelineLayout, null);
             vkDestroyRenderPass(device, renderPass, null);
@@ -168,6 +173,7 @@ public class Main {
             }
             // swap chain 需要先被 destroy 因為他需要 device
             vkDestroySwapchainKHR(device, swapChain, null);
+            swapChainExtent.free();
             // device 需要先銷毀因他需要 instance
             vkDestroyDevice(device, null); // physical device 不需要 free 因為 physical 是 vulcan 列舉出來記憶體位置給我們選 不是我們建立的
             if(ENABLE_VALIDATION_LAYERS) {
@@ -557,7 +563,8 @@ public class Main {
 
                 VkSurfaceFormatKHR surfaceFormatKHR = chooseSwapSurfaceFormat(details.formats);
                 int swapPresentMode = chooseSwapPresentMode(details.presentModes);
-                VkExtent2D swapExtent = chooseSwapExtent(stack, details.capabilities);
+                swapChainExtent = VkExtent2D.calloc();
+                swapChainExtent.set(chooseSwapExtent(stack, details.capabilities));
 
                 int imageCount =  details.capabilities.minImageCount() + 1;
                 // maxImageCount = 0 => there is no max image count
@@ -571,7 +578,7 @@ public class Main {
                 createInfo.minImageCount(imageCount);
 
                 createInfo.imageColorSpace(surfaceFormatKHR.colorSpace());
-                createInfo.imageExtent(swapExtent);
+                createInfo.imageExtent(swapChainExtent);
                 createInfo.imageArrayLayers(1); // just 2d images, not 1 if create 3d movies
                 createInfo.imageUsage(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT); // 變成顏色渲染目標
                 System.out.println("DEBUG: IMAGE USGAE: " + createInfo.imageUsage());
@@ -612,7 +619,6 @@ public class Main {
                 }
 
                 swapChainFormat = surfaceFormatKHR.format();
-                swapChainExtent = swapExtent;
 
             }
         }
@@ -850,6 +856,29 @@ public class Main {
                 }
 
                 renderPass = renderPassBuffer.get(0);
+            }
+        }
+
+        private void createFrameBuffers() {
+            try (MemoryStack stack = stackPush()) {
+                swapChainFrameBuffers = new ArrayList<>();
+                for (int i = 0; i < swapChainImageViews.size(); i++) {
+                    LongBuffer attachments = stack.longs(swapChainImageViews.get(i));
+                    VkFramebufferCreateInfo framebufferInfo = VkFramebufferCreateInfo.calloc(stack);
+                    framebufferInfo.sType(VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO);
+                    framebufferInfo.renderPass(renderPass);
+                    framebufferInfo.attachmentCount(1);
+                    framebufferInfo.pAttachments(attachments);
+                    framebufferInfo.width(swapChainExtent.width());
+                    framebufferInfo.height(swapChainExtent.height());
+                    framebufferInfo.layers(1);
+
+                    LongBuffer framebuffer = stack.callocLong(1);
+                    if (vkCreateFramebuffer(device, framebufferInfo, null, framebuffer) != VK_SUCCESS) {
+                        throw new RuntimeException("failed to create framebuffer!");
+                    }
+                    swapChainFrameBuffers.add(framebuffer.get(0));
+                }
             }
         }
 
