@@ -110,7 +110,10 @@ public class Main {
         private long pipeline;
         private List<Long> swapChainFrameBuffers;
         private long commandPool;
-        private long commandBuffer;
+        private VkCommandBuffer commandBuffer;
+        long imageAvailableSemaphore;
+        long renderFinishedSemaphore;
+        long inFlightFence;
 
 
         // ======= METHODS ======= //
@@ -155,17 +158,25 @@ public class Main {
             createFrameBuffers();
             createCommandPool();
             createCommandBuffer();
+            createSyncObjects();
         }
 
         private void mainLoop() {
             // error occurs or user presses X
             while(!glfwWindowShouldClose(window)) {
                 glfwPollEvents();
+                drawFrame();
             }
+
+            vkDeviceWaitIdle(device);
 
         }
 
         private void cleanup() {
+            vkDestroySemaphore(device, imageAvailableSemaphore, null);
+            vkDestroySemaphore(device, renderFinishedSemaphore, null);
+            vkDestroyFence(device, inFlightFence, null);
+
             vkDestroyCommandPool(device, commandPool, null);
             for (long framebuffer : swapChainFrameBuffers) {
                 vkDestroyFramebuffer(device, framebuffer, null);
@@ -850,10 +861,20 @@ public class Main {
                 subpass.colorAttachmentCount(1);
                 subpass.pColorAttachments(colorAttachmentRef);
 
+                VkSubpassDependency.Buffer dependency = VkSubpassDependency.calloc(1, stack);
+                dependency.srcSubpass(VK_SUBPASS_EXTERNAL);
+                dependency.dstSubpass(0);
+                dependency.srcStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                dependency.srcAccessMask(0);
+                dependency.dstStageMask(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+                dependency.dstAccessMask(VK_ACCESS_COLOR_ATTACHMENT_WRITE_BIT);
+
+
                 VkRenderPassCreateInfo renderPassInfo = VkRenderPassCreateInfo.calloc(stack);
                 renderPassInfo.sType(VK_STRUCTURE_TYPE_RENDER_PASS_CREATE_INFO);
                 renderPassInfo.pAttachments(colorAttachment);
                 renderPassInfo.pSubpasses(subpass);
+                renderPassInfo.pDependencies(dependency);
 
                 LongBuffer renderPassBuffer = stack.callocLong(1);
                 if (vkCreateRenderPass(device, renderPassInfo, null, renderPassBuffer) != VK_SUCCESS) {
@@ -917,7 +938,7 @@ public class Main {
                     throw new RuntimeException("failed to allocate command buffers!");
                 }
 
-                commandBuffer = commandBufferPointer.get(0);
+                commandBuffer = new VkCommandBuffer(commandBufferPointer.get(0), device);
             }
         }
 
@@ -967,10 +988,79 @@ public class Main {
                 scissor.extent(swapChainExtent);
                 vkCmdSetScissor(commandBuffer, 0, scissor);
 
+                vkCmdDraw(commandBuffer, 3, 1, 0, 0);
+
                 vkCmdEndRenderPass(commandBuffer);
                 if (vkEndCommandBuffer(commandBuffer) != VK_SUCCESS) {
                     throw new RuntimeException("failed to record command buffer!");
                 }
+            }
+        }
+
+        private void createSyncObjects() {
+            try (MemoryStack stack = stackPush()) {
+                VkSemaphoreCreateInfo semaphoreInfo = VkSemaphoreCreateInfo.calloc(stack);
+                semaphoreInfo.sType(VK_STRUCTURE_TYPE_SEMAPHORE_CREATE_INFO);
+                VkFenceCreateInfo fenceInfo = VkFenceCreateInfo.calloc(stack);
+                fenceInfo.sType(VK_STRUCTURE_TYPE_FENCE_CREATE_INFO);
+                fenceInfo.flags(VK_FENCE_CREATE_SIGNALED_BIT);
+                LongBuffer imageAvailableSemaphoreBuffer = stack.callocLong(1);
+                LongBuffer renderFinishedSemaphoreBuffer = stack.callocLong(1);
+                LongBuffer inFlightFenceBuffer = stack.callocLong(1);
+                if (vkCreateSemaphore(device, semaphoreInfo, null, imageAvailableSemaphoreBuffer) != VK_SUCCESS ||
+                        vkCreateSemaphore(device, semaphoreInfo, null, renderFinishedSemaphoreBuffer) != VK_SUCCESS ||
+                        vkCreateFence(device, fenceInfo, null, inFlightFenceBuffer) != VK_SUCCESS
+                ) {
+                    throw new RuntimeException("failed to create semaphores!");
+                }
+
+                imageAvailableSemaphore = imageAvailableSemaphoreBuffer.get(0);
+                renderFinishedSemaphore = renderFinishedSemaphoreBuffer.get(0);
+                inFlightFence = inFlightFenceBuffer.get(0);
+
+            }
+        }
+
+        private void drawFrame() {
+            try (MemoryStack stack = stackPush()) {
+                vkWaitForFences(device, inFlightFence, true, Long.MAX_VALUE);
+                vkResetFences(device, inFlightFence);
+
+                IntBuffer imageIndex = stack.callocInt(1);
+                vkAcquireNextImageKHR(device, swapChain, Long.MAX_VALUE, imageAvailableSemaphore, VK_NULL_HANDLE, imageIndex);
+
+                vkResetCommandBuffer(commandBuffer, 0);
+                recordCommandBuffer(commandBuffer, imageIndex.get(0));
+
+                VkSubmitInfo submitInfo = VkSubmitInfo.calloc(stack);
+                submitInfo.sType(VK_STRUCTURE_TYPE_SUBMIT_INFO);
+
+                LongBuffer waitSemaphores = stack.longs(imageAvailableSemaphore);
+                IntBuffer waitStages = stack.ints(VK_PIPELINE_STAGE_COLOR_ATTACHMENT_OUTPUT_BIT);
+
+                submitInfo.waitSemaphoreCount(1);
+                submitInfo.pWaitSemaphores(waitSemaphores);
+                submitInfo.pWaitDstStageMask(waitStages);
+
+                PointerBuffer pCommandBuffer= stack.pointers(commandBuffer);
+
+                submitInfo.pCommandBuffers(pCommandBuffer);
+
+                LongBuffer signalSemaphores = stack.longs(renderFinishedSemaphore);
+                submitInfo.pSignalSemaphores(signalSemaphores);
+
+                if (vkQueueSubmit(graphicsQueue, submitInfo, inFlightFence) != VK_SUCCESS) {
+                    throw new RuntimeException("failed to submit draw command buffer!");
+                }
+
+                VkPresentInfoKHR presentInfo = VkPresentInfoKHR.calloc(stack);
+                presentInfo.sType(VK_STRUCTURE_TYPE_PRESENT_INFO_KHR);
+                presentInfo.pWaitSemaphores(signalSemaphores);
+                LongBuffer swapChains = stack.longs(swapChain);
+                presentInfo.swapchainCount(1);
+                presentInfo.pSwapchains(swapChains);
+                presentInfo.pImageIndices(imageIndex);
+                vkQueuePresentKHR(presentQueue, presentInfo);
             }
         }
 
